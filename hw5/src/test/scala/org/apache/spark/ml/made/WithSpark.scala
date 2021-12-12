@@ -9,7 +9,7 @@ trait WithSpark {
 
 object WithSpark {
   lazy val _spark = SparkSession.builder
-    .appName("Simple Application")
+    .appName("Linear Regression")
     .master("local[4]")
     .getOrCreate()
 

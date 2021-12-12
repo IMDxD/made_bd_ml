@@ -1,81 +1,99 @@
 package org.apache.spark.ml.made
 
+import scala.collection.JavaConverters._
 import com.google.common.io.Files
 import org.scalatest._
 import flatspec._
 import matchers._
 import org.apache.spark.ml
 import org.apache.spark.ml.{Pipeline, PipelineModel}
-import org.apache.spark.ml.linalg.{Vector, Vectors}
+import org.apache.spark.ml.linalg.{Vector, VectorUDT, Vectors}
 import org.apache.spark.ml.param.ParamMap
-import org.apache.spark.sql.{DataFrame, SparkSession}
+import org.apache.spark.sql.types.{DoubleType, StructField, StructType}
+import org.apache.spark.sql.{DataFrame, SparkSession, Row}
 
 class LinearRegressionTest extends AnyFlatSpec with should.Matchers with WithSpark {
 
-  val delta = 0.0001
+  val delta = 0.1
   lazy val data: DataFrame = LinearRegressionTest._data
-  lazy val vectors: Seq[Vector] = LinearRegressionTest._vectors
 
-  "Model" should "scale input data" in {
+  "Model" should "make prediction" in {
     val model: LinearRegressionModel = new LinearRegressionModel(
-      means = Vectors.dense(2.0, -0.5).toDense,
-      stds = Vectors.dense(1.5, 0.5).toDense
-    ).setInputCol("features")
-      .setOutputCol("features")
+      weights = Vectors.dense(2.0, 3.0).toDense,
+      intercept = 1.0
+    ).setFeatureCol("features")
+      .setLabelCol("label")
+      .setOutputCol("predictions")
 
-    val vectors: Array[Vector] = model.transform(data).collect().map(_.getAs[Vector](0))
+    val predictions = model.transform(data).collect().map(_.getAs[Double](2))
 
-    vectors.length should be(2)
+    predictions.length should be(3)
 
     validateModel(model, model.transform(data))
   }
 
-  "Model" should "scale input data without mean subtraction" in {
-    val model: LinearRegressionModel = new LinearRegressionModel(
-      means = Vectors.dense(2.0, -0.5).toDense,
-      stds = Vectors.dense(1.5, 0.5).toDense
-    ).setInputCol("features")
-      .setOutputCol("features")
 
-    val copy = model.copy(ParamMap(model.shiftMean -> false))
-
-    val vectors: Array[Vector] = copy.transform(data).collect().map(_.getAs[Vector](0))
-
-    vectors.length should be(2)
-
-    vectors(0)(0) should be((13.5) / 1.5 +- delta)
-    vectors(0)(1) should be((12) / 0.5 +- delta)
-
-    vectors(1)(0) should be((-1) / 1.5 +- delta)
-    vectors(1)(1) should be((0) / 0.5 +- delta)
-  }
-
-  "Estimator" should "calculate means" in {
+  "Estimator" should "calculate weights" in {
     val estimator = new LinearRegression()
-      .setInputCol("features")
-      .setOutputCol("features")
+      .setFeatureCol("features")
+      .setLabelCol("label")
+      .setOutputCol("predictions")
+
+    estimator.setLr(0.01)
+    estimator.setNIter(1000)
 
     val model = estimator.fit(data)
 
-    model.means(0) should be(vectors.map(_(0)).sum / vectors.length +- delta)
-    model.means(1) should be(vectors.map(_(1)).sum / vectors.length +- delta)
+    model.weights(0) should be(2.0 +- delta)
+    model.weights(1) should be(3.0 +- delta)
   }
 
-  "Estimator" should "calculate stds" in {
+  "Estimator" should "not fit with zero lr" in {
     val estimator = new LinearRegression()
-      .setInputCol("features")
-      .setOutputCol("features")
+      .setFeatureCol("features")
+      .setLabelCol("label")
+      .setOutputCol("predictions")
+
+    estimator.setLr(0.0)
 
     val model = estimator.fit(data)
 
-    model.stds(0) should be(Math.sqrt(vectors.map(v => (v(0) -  model.means(0))).map(x => x*x).sum / (vectors.length - 1)) +- delta)
-    model.stds(1) should be(Math.sqrt(vectors.map(v => (v(1) -  model.means(1))).map(x => x*x).sum / (vectors.length - 1)) +- delta)
+    model.weights(0) should be(0.0 +- 1e-4)
+    model.weights(1) should be(0.0 +- 1e-4)
+    model.intercept should be(0.0 +- 1e-4)
+  }
+
+  "Estimator" should "not fit with zero nIter" in {
+    val estimator = new LinearRegression()
+      .setFeatureCol("features")
+      .setLabelCol("label")
+      .setOutputCol("predictions")
+
+    estimator.setNIter(0)
+
+    val model = estimator.fit(data)
+
+    model.weights(0) should be(0.0 +- 1e-4)
+    model.weights(1) should be(0.0 +- 1e-4)
+    model.intercept should be(0.0 +- 1e-4)
+  }
+
+  "Estimator" should "calculate intercept" in {
+    val estimator = new LinearRegression()
+      .setFeatureCol("features")
+      .setLabelCol("label")
+      .setOutputCol("predictions")
+
+    val model = estimator.fit(data)
+
+    model.intercept should be(1.0 +- delta)
   }
 
   "Estimator" should "should produce functional model" in {
     val estimator = new LinearRegression()
-      .setInputCol("features")
-      .setOutputCol("features")
+      .setFeatureCol("features")
+      .setLabelCol("label")
+      .setOutputCol("predictions")
 
     val model = estimator.fit(data)
 
@@ -83,23 +101,23 @@ class LinearRegressionTest extends AnyFlatSpec with should.Matchers with WithSpa
   }
 
   private def validateModel(model: LinearRegressionModel, data: DataFrame) = {
-    val vectors: Array[Vector] = data.collect().map(_.getAs[Vector](0))
+    val predictions: Array[Double] = data.collect().map(_.getAs[Double](2))
 
-    vectors.length should be(2)
+    predictions.length should be(3)
 
-    vectors(0)(0) should be((13.5 - model.means(0)) / model.stds(0) +- delta)
-    vectors(0)(1) should be((12 - model.means(1)) / model.stds(1) +- delta)
+    predictions(0) should be(1.0 + 1.0 * 2.0 + 2.0 * 3.0 +- delta)
+    predictions(1) should be(1.0 + 4.0 * 2.0 + 3.0 * 3.0 +- delta)
+    predictions(2) should be(1.0 - 1.0 * 2.0 + 3.0 * 3.0 +- delta)
 
-    vectors(1)(0) should be((-1 - model.means(0)) / model.stds(0) +- delta)
-    vectors(1)(1) should be((0 - model.means(1)) / model.stds(1) +- delta)
   }
 
   "Estimator" should "work after re-read" in {
 
     val pipeline = new Pipeline().setStages(Array(
       new LinearRegression()
-        .setInputCol("features")
-        .setOutputCol("features")
+        .setFeatureCol("features")
+        .setLabelCol("label")
+        .setOutputCol("predictions")
     ))
 
     val tmpFolder = Files.createTempDir()
@@ -110,8 +128,9 @@ class LinearRegressionTest extends AnyFlatSpec with should.Matchers with WithSpa
 
     val model = reRead.fit(data).stages(0).asInstanceOf[LinearRegressionModel]
 
-    model.means(0) should be(vectors.map(_(0)).sum / vectors.length +- delta)
-    model.means(1) should be(vectors.map(_(1)).sum / vectors.length +- delta)
+    model.weights(0) should be(2.0 +- delta)
+    model.weights(1) should be(3.0 +- delta)
+    model.intercept should be(1.0 +- delta)
 
     validateModel(model, model.transform(data))
   }
@@ -120,8 +139,9 @@ class LinearRegressionTest extends AnyFlatSpec with should.Matchers with WithSpa
 
     val pipeline = new Pipeline().setStages(Array(
       new LinearRegression()
-        .setInputCol("features")
-        .setOutputCol("features")
+        .setFeatureCol("features")
+        .setLabelCol("label")
+        .setOutputCol("predictions")
     ))
 
     val model = pipeline.fit(data)
@@ -138,13 +158,18 @@ class LinearRegressionTest extends AnyFlatSpec with should.Matchers with WithSpa
 
 object LinearRegressionTest extends WithSpark {
 
-  lazy val _vectors = Seq(
-    Vectors.dense(13.5, 12),
-    Vectors.dense(-1, 0)
+  lazy val schema: StructType = StructType(
+    Array(
+      StructField("label", DoubleType),
+      StructField("features", new VectorUDT())
+  ))
+
+  lazy val rowData = List(
+    Row(9.0, Vectors.dense(1.0, 2.0)),
+    Row(18.0, Vectors.dense(4.0, 3.0)),
+    Row(8.0, Vectors.dense(-1.0, 3.0))
   )
 
-  lazy val _data: DataFrame = {
-    import sqlc.implicits._
-    _vectors.map(x => Tuple1(x)).toDF("features")
-  }
+  lazy val _data: DataFrame = sqlc.createDataFrame(rowData.asJava, schema)
+
 }
